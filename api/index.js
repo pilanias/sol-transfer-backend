@@ -1,26 +1,16 @@
-// /backend/api/index.js
 import express from 'express';
 import bodyParser from 'body-parser';
 import cors from 'cors';
-import {
-  Connection,
-  clusterApiUrl,
-  Keypair,
-  PublicKey,
-  Transaction,
-  SystemProgram,
-  LAMPORTS_PER_SOL
-} from '@solana/web3.js';
+import { Connection, clusterApiUrl, Keypair, PublicKey, Transaction, SystemProgram, LAMPORTS_PER_SOL } from '@solana/web3.js';
 import bip39 from 'bip39';
 import { derivePath } from 'ed25519-hd-key';
-import {
-  TOKEN_PROGRAM_ID,
-  getAssociatedTokenAddress,
-  createAssociatedTokenAccountInstruction,
-  createTransferInstruction
-} from '@solana/spl-token';
+import { TOKEN_PROGRAM_ID, getAssociatedTokenAddress, createAssociatedTokenAccountInstruction, createTransferInstruction } from '@solana/spl-token';
+import pkg from 'ws';
+const { Server } = pkg; // Import WebSocket server
 
 const app = express();
+const port = process.env.PORT || 3001;
+
 app.use(cors());
 app.use(bodyParser.json());
 
@@ -61,19 +51,11 @@ app.post('/start-monitoring', async (req, res) => {
       if (lamports > 0) {
         console.log(`Received ${lamports / LAMPORTS_PER_SOL} SOL, transferring to secure wallet...`);
 
-        const transactionFee = 5000; // Estimate transaction fee in lamports
-        const lamportsToTransfer = lamports - transactionFee;
-     
-        if (lamportsToTransfer <= 0) {
-          console.error('Not enough SOL to cover the transaction fee.');
-          return;
-        }
-
         const transaction = new Transaction().add(
           SystemProgram.transfer({
             fromPubkey: compromisedWallet.publicKey,
             toPubkey: newSecureWalletPublicKey,
-            lamports: lamportsToTransfer
+            lamports: lamports - 5000 // Leave some lamports for transaction fee
           })
         );
 
@@ -88,14 +70,13 @@ app.post('/start-monitoring', async (req, res) => {
             signature,
             from: compromisedWallet.publicKey.toBase58(),
             to: newSecureWalletPublicKey.toBase58(),
-            amount: lamportsToTransfer / LAMPORTS_PER_SOL,
+            amount: lamports / LAMPORTS_PER_SOL,
             status: 'confirmed',
           });
+
+          broadcastTransactionLog(); // Broadcast to WebSocket clients
         } catch (error) {
           console.error('Error transferring funds:', error);
-          if (error instanceof SendTransactionError) {
-            console.error('Transaction Logs:', error.transactionLogs);
-          }
         }
       }
     };
@@ -141,11 +122,10 @@ app.post('/start-monitoring', async (req, res) => {
             amount: tokenAmount,
             status: 'confirmed',
           });
+
+          broadcastTransactionLog(); // Broadcast to WebSocket clients
         } catch (error) {
           console.error('Error transferring tokens:', error);
-          if (error instanceof SendTransactionError) {
-            console.error('Transaction Logs:', error.transactionLogs);
-          }
         }
       }
     };
@@ -183,7 +163,7 @@ app.post('/stop-monitoring', (req, res) => {
 
     delete monitoringTasks[publicKey];
     res.json({ message: 'Monitoring stopped' });
-    console.log({message: `Monitoring stopped for ${publicKey}`});
+    console.log({ message: `Monitoring stopped for ${publicKey}` });
   } else {
     res.status(400).json({ message: 'Monitoring not found for this public key' });
   }
@@ -193,4 +173,23 @@ app.get('/transactions', (req, res) => {
   res.json(transactionLog);
 });
 
-export default app;
+const server = app.listen(port, () => {
+  console.log(`Server running on http://localhost:${port}`);
+});
+
+// WebSocket setup
+const wss = new Server({ server });
+
+const broadcastTransactionLog = () => {
+  const message = JSON.stringify({ type: 'transactionLog', data: transactionLog });
+  wss.clients.forEach((client) => {
+    if (client.readyState === pkg.OPEN) {
+      client.send(message);
+    }
+  });
+};
+
+wss.on('connection', (ws) => {
+  console.log('WebSocket client connected');
+  ws.send(JSON.stringify({ type: 'transactionLog', data: transactionLog }));
+});
